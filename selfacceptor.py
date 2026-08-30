@@ -8,8 +8,8 @@ from telethon.errors import RPCError
 # تنظیمات
 # =========================================================
 
-API_ID = 12345678
-API_HASH = "YOUR_API_HASH"
+API_ID = 32553007
+API_HASH = "a18a9a0eafeb8a93a6f97bd161e56856"
 
 SESSION = "telegram_account"
 
