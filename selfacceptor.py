@@ -1,312 +1,642 @@
 import asyncio
+import os
+import re
 
 from telethon import TelegramClient, functions
-from telethon.errors import RPCError
+from telethon.errors import (
+    ApiIdInvalidError,
+    PhoneCodeInvalidError,
+    PhoneNumberInvalidError,
+    SessionPasswordNeededError,
+    RPCError,
+)
+from telethon.tl.types import Channel
 
 
 # =========================================================
-# تنظیمات
+# CONFIG
 # =========================================================
 
 API_ID = 32553007
 API_HASH = "a18a9a0eafeb8a93a6f97bd161e56856"
 
-SESSION = "telegram_account"
+SESSION_DIR = "sessions"
+
+os.makedirs(SESSION_DIR, exist_ok=True)
 
 
 # =========================================================
-# Telegram Client
+# INPUT
 # =========================================================
 
-client = TelegramClient(
-    SESSION,
-    API_ID,
-    API_HASH
-)
+def clean_input(value):
+    """
+    حذف کاراکترهای مخفی/غیرقابل چاپ از ورودی ترمینال.
+    """
+    if value is None:
+        return ""
+
+    value = value.strip()
+
+    # فقط اعداد انگلیسی را نگه می‌داریم
+    digits = re.findall(r"[0-9]", value)
+
+    if digits:
+        return "".join(digits)
+
+    return value
 
 
 # =========================================================
-# دریافت درخواست‌های در انتظار
+# LOGIN
 # =========================================================
 
-async def get_pending_requests(channel):
+async def login():
 
-    result = await client(
-        functions.messages.GetChatInviteImportersRequest(
-            peer=channel,
-            requested=True,
-            limit=100,
-            offset_date=None,
-            offset_user=functions.InputUserEmpty(),
-        )
+    phone = input(
+        "\n📱 شماره Telegram را وارد کنید:\n> "
+    ).strip()
+
+    if not phone:
+        print("❌ شماره وارد نشده.")
+        return None
+
+    session_name = re.sub(
+        r"[^0-9+]",
+        "",
+        phone
+    ).replace("+", "")
+
+    session_path = os.path.join(
+        SESSION_DIR,
+        session_name
     )
 
-    return result
-
-
-# =========================================================
-# قبول همه درخواست‌ها
-# =========================================================
-
-async def approve_all(channel):
+    client = TelegramClient(
+        session_path,
+        API_ID,
+        API_HASH
+    )
 
     try:
 
-        print("\n⏳ در حال قبول تمام درخواست‌ها...")
+        await client.connect()
+
+        if not await client.is_user_authorized():
+
+            print(
+                "\n📨 در حال ارسال کد ورود..."
+            )
+
+            await client.send_code_request(
+                phone
+            )
+
+            code = input(
+                "\n🔐 کد Telegram را وارد کنید:\n> "
+            ).strip()
+
+            try:
+
+                await client.sign_in(
+                    phone=phone,
+                    code=code
+                )
+
+            except SessionPasswordNeededError:
+
+                password = input(
+                    "\n🔑 رمز Two-Step Verification:\n> "
+                )
+
+                await client.sign_in(
+                    password=password
+                )
+
+        me = await client.get_me()
+
+        print(
+            "\n======================================"
+        )
+        print("✅ ورود موفق بود")
+        print(
+            f"👤 {me.first_name or ''} "
+            f"{me.last_name or ''}"
+        )
+        print(
+            "======================================"
+        )
+
+        return client
+
+    except ApiIdInvalidError:
+
+        print(
+            "\n❌ API_ID یا API_HASH نادرست است."
+        )
+
+    except PhoneNumberInvalidError:
+
+        print(
+            "\n❌ شماره تلفن نادرست است."
+        )
+
+    except PhoneCodeInvalidError:
+
+        print(
+            "\n❌ کد Telegram نادرست است."
+        )
+
+    except Exception as e:
+
+        print(
+            f"\n❌ خطا در Login:\n{e}"
+        )
+
+    return None
+
+
+# =========================================================
+# GET CHANNELS
+# =========================================================
+
+async def get_channels(client):
+
+    dialogs = await client.get_dialogs()
+
+    channels = []
+
+    for dialog in dialogs:
+
+        entity = dialog.entity
+
+        if isinstance(entity, Channel):
+
+            if getattr(
+                entity,
+                "broadcast",
+                False
+            ):
+
+                channels.append(entity)
+
+    return channels
+
+
+# =========================================================
+# SHOW CHANNELS
+# =========================================================
+
+async def choose_channel(client):
+
+    channels = await get_channels(client)
+
+    if not channels:
+
+        print(
+            "\n❌ هیچ کانالی پیدا نشد."
+        )
+
+        return None
+
+    print(
+        "\n======================================"
+    )
+    print("📢 کانال‌های اکانت")
+    print(
+        "======================================"
+    )
+
+    for number, channel in enumerate(
+        channels,
+        start=1
+    ):
+
+        print(
+            f"{number}. {channel.title}"
+        )
+
+    print(
+        "======================================"
+    )
+
+    while True:
+
+        raw = input(
+            "\nشماره کانال را وارد کنید:\n> "
+        )
+
+        # حل مشکل کاراکتر مخفی ترمینال
+        digits = re.findall(
+            r"[0-9]",
+            raw
+        )
+
+        if not digits:
+
+            print(
+                "❌ فقط شماره کانال را وارد کنید."
+            )
+
+            continue
+
+        try:
+
+            number = int(
+                "".join(digits)
+            )
+
+        except ValueError:
+
+            print(
+                "❌ شماره نادرست."
+            )
+
+            continue
+
+        if 1 <= number <= len(channels):
+
+            return channels[number - 1]
+
+        print(
+            f"❌ عدد باید بین 1 تا {len(channels)} باشد."
+        )
+
+
+# =========================================================
+# GET PENDING REQUESTS
+# =========================================================
+
+async def get_pending_requests(
+    client,
+    channel
+):
+
+    try:
 
         result = await client(
+            functions.messages.GetChatInviteImportersRequest(
+                peer=channel,
+                requested=True,
+                limit=100,
+                offset_date=None,
+                offset_user=None,
+            )
+        )
+
+        return result
+
+    except RPCError as e:
+
+        print(
+            f"\n❌ خطای Telegram:\n{e}"
+        )
+
+    except Exception as e:
+
+        print(
+            f"\n❌ خطا:\n{e}"
+        )
+
+    return None
+
+
+# =========================================================
+# COUNT REQUESTS
+# =========================================================
+
+async def show_request_count(
+    client,
+    channel
+):
+
+    result = await get_pending_requests(
+        client,
+        channel
+    )
+
+    if result is None:
+        return None
+
+    count = len(result.users)
+
+    print(
+        "\n======================================"
+    )
+
+    print(
+        f"📊 درخواست‌های در انتظار: {count}"
+    )
+
+    print(
+        "======================================"
+    )
+
+    return count
+
+
+# =========================================================
+# APPROVE ALL
+# =========================================================
+
+async def approve_all(
+    client,
+    channel
+):
+
+    try:
+
+        print(
+            "\n⏳ در حال قبول تمام درخواست‌ها..."
+        )
+
+        await client(
             functions.messages.HideAllChatJoinRequestsRequest(
                 peer=channel,
                 approved=True
             )
         )
 
-        print("\n✅ تمام درخواست‌های موجود تأیید شدند.")
+        print(
+            "\n✅ عملیات موفقانه انجام شد."
+        )
 
-        return result
+        return True
 
     except RPCError as e:
 
-        print(f"\n❌ خطای تلگرام: {e}")
+        print(
+            f"\n❌ خطای Telegram:\n{e}"
+        )
 
     except Exception as e:
 
-        print(f"\n❌ خطا: {e}")
-
-
-# =========================================================
-# تعداد درخواست‌ها
-# =========================================================
-
-async def show_count(channel):
-
-    try:
-
-        result = await get_pending_requests(channel)
-
-        count = len(result.users)
-
         print(
-            f"\n📊 تعداد درخواست‌های دریافت‌شده: {count}"
+            f"\n❌ خطا:\n{e}"
         )
 
-        if count > 0:
-
-            print("\nچند درخواست موجود:")
-
-            for user in result.users[:10]:
-
-                name = (
-                    f"{user.first_name or ''} "
-                    f"{user.last_name or ''}"
-                ).strip()
-
-                username = (
-                    f"@{user.username}"
-                    if user.username
-                    else "بدون username"
-                )
-
-                print(
-                    f"  • {name} | {username} | {user.id}"
-                )
-
-        return count
-
-    except RPCError as e:
-
-        print(f"\n❌ خطای تلگرام: {e}")
-
-    except Exception as e:
-
-        print(f"\n❌ خطا: {e}")
-
-    return 0
+    return False
 
 
 # =========================================================
-# انتخاب کانال
+# CHANNEL MENU
 # =========================================================
 
-async def choose_channel():
-
-    dialogs = await client.get_dialogs()
-
-    channels = []
-
-    print("\n======================================")
-    print("📢 کانال‌های اکانت")
-    print("======================================")
-
-    for dialog in dialogs:
-
-        entity = dialog.entity
-
-        # فقط Channel
-        if getattr(entity, "broadcast", False):
-
-            channels.append(entity)
-
-    if not channels:
-
-        print("❌ هیچ کانالی پیدا نشد.")
-        return None
-
-    for i, channel in enumerate(channels, 1):
-
-        print(
-            f"{i}. {channel.title}"
-        )
-
-    print("======================================")
+async def channel_menu(
+    client,
+    channel
+):
 
     while True:
 
-        choice = input(
-            "\nشماره کانال را وارد کنید: "
-        ).strip()
+        print(
+            "\n======================================"
+        )
 
-        try:
+        print(
+            f"📢 کانال: {channel.title}"
+        )
 
-            index = int(choice) - 1
+        print(
+            "======================================"
+        )
 
-            if 0 <= index < len(channels):
+        print(
+            "\n1️⃣ بررسی درخواست‌ها"
+        )
 
-                return channels[index]
+        print(
+            "2️⃣ ✅ قبول همه درخواست‌ها"
+        )
 
-        except ValueError:
-            pass
+        print(
+            "3️⃣ 🔄 تازه‌سازی"
+        )
 
-        print("❌ انتخاب نادرست.")
+        print(
+            "4️⃣ ◀️ برگشت"
+        )
 
+        print(
+            "======================================"
+        )
 
-# =========================================================
-# منوی کانال
-# =========================================================
-
-async def channel_menu(channel):
-
-    print("\n======================================")
-    print(f"📢 کانال: {channel.title}")
-    print("======================================")
-
-    while True:
-
-        print("\n1️⃣ بررسی درخواست‌ها")
-        print("2️⃣ قبول همه درخواست‌ها")
-        print("3️⃣ بازگشت")
-        print("======================================")
-
-        choice = input(
+        raw = input(
             "انتخاب: "
-        ).strip()
+        )
 
-        # -----------------------------------------------
-        # تعداد
-        # -----------------------------------------------
+        # حذف کاراکترهای مخفی
+        digits = re.findall(
+            r"[0-9]",
+            raw
+        )
+
+        if not digits:
+
+            print(
+                "❌ گزینه نادرست."
+            )
+
+            continue
+
+        choice = "".join(digits)
+
+        # -------------------------------------------------
+        # COUNT
+        # -------------------------------------------------
 
         if choice == "1":
 
-            await show_count(channel)
+            await show_request_count(
+                client,
+                channel
+            )
 
-        # -----------------------------------------------
-        # قبول همه
-        # -----------------------------------------------
+        # -------------------------------------------------
+        # APPROVE ALL
+        # -------------------------------------------------
 
         elif choice == "2":
 
-            count = await show_count(channel)
-
-            if count == 0:
-
-                print(
-                    "\nℹ️ درخواست قابل پردازشی پیدا نشد."
-                )
-
-                continue
-
             print(
-                f"\n⚠️ {count} درخواست در لیست فعلی وجود دارد."
+                "\n⚠️ این گزینه تمام درخواست‌های "
+                "در انتظار این کانال را تأیید می‌کند."
             )
 
             confirm = input(
-                "آیا همه تأیید شوند؟ (y/n): "
-            ).lower().strip()
+                "ادامه؟ (y/n): "
+            ).strip().lower()
 
-            if confirm == "y":
+            if confirm in (
+                "y",
+                "yes"
+            ):
 
-                await approve_all(channel)
+                await approve_all(
+                    client,
+                    channel
+                )
 
             else:
 
-                print("لغو شد.")
+                print(
+                    "❌ لغو شد."
+                )
 
-        # -----------------------------------------------
-        # خروج
-        # -----------------------------------------------
+        # -------------------------------------------------
+        # REFRESH
+        # -------------------------------------------------
 
         elif choice == "3":
+
+            continue
+
+        # -------------------------------------------------
+        # BACK
+        # -------------------------------------------------
+
+        elif choice == "4":
 
             break
 
         else:
 
-            print("❌ گزینه نادرست.")
+            print(
+                "❌ گزینه نادرست."
+            )
 
 
 # =========================================================
-# Main
+# MAIN MENU
+# =========================================================
+
+async def main_menu(client):
+
+    while True:
+
+        print(
+            "\n======================================"
+        )
+
+        print(
+            "🤖 Telegram Join Request Manager"
+        )
+
+        print(
+            "======================================"
+        )
+
+        print(
+            "\n1️⃣ 📢 کانال‌های من"
+        )
+
+        print(
+            "2️⃣ 🔄 تازه‌سازی"
+        )
+
+        print(
+            "3️⃣ ❌ خروج"
+        )
+
+        print(
+            "======================================"
+        )
+
+        raw = input(
+            "انتخاب: "
+        )
+
+        digits = re.findall(
+            r"[0-9]",
+            raw
+        )
+
+        if not digits:
+
+            print(
+                "❌ گزینه نادرست."
+            )
+
+            continue
+
+        choice = "".join(digits)
+
+        # -------------------------------------------------
+        # CHANNELS
+        # -------------------------------------------------
+
+        if choice == "1":
+
+            channel = await choose_channel(
+                client
+            )
+
+            if channel:
+
+                await channel_menu(
+                    client,
+                    channel
+                )
+
+        # -------------------------------------------------
+        # REFRESH
+        # -------------------------------------------------
+
+        elif choice == "2":
+
+            channels = await get_channels(
+                client
+            )
+
+            print(
+                f"\n📢 تعداد کانال‌ها: "
+                f"{len(channels)}"
+            )
+
+        # -------------------------------------------------
+        # EXIT
+        # -------------------------------------------------
+
+        elif choice == "3":
+
+            print(
+                "\n👋 برنامه بسته شد."
+            )
+
+            break
+
+        else:
+
+            print(
+                "❌ گزینه نادرست."
+            )
+
+
+# =========================================================
+# MAIN
 # =========================================================
 
 async def main():
 
-    print("======================================")
-    print(" Telegram Join Request Manager")
-    print("======================================")
+    client = await login()
 
-    # اولین اجرا:
-    # شماره تلفن، کد ورود و در صورت فعال بودن
-    # Two-Step Verification را می‌خواهد.
+    if client is None:
 
-    await client.start()
+        return
 
-    me = await client.get_me()
+    try:
 
-    print(
-        f"\n✅ وارد شدید: "
-        f"{me.first_name or ''} "
-        f"{me.last_name or ''}"
-    )
+        await main_menu(client)
 
-    while True:
+    finally:
 
-        channel = await choose_channel()
-
-        if channel is None:
-
-            return
-
-        await channel_menu(channel)
-
-        again = input(
-            "\nکانال دیگری؟ (y/n): "
-        ).lower().strip()
-
-        if again != "y":
-
-            break
-
-    print("\n👋 پایان برنامه.")
+        await client.disconnect()
 
 
 # =========================================================
-# Run
+# RUN
 # =========================================================
 
 if __name__ == "__main__":
 
-    with client:
-
-        client.loop.run_until_complete(
-            main()
-        )
+    asyncio.run(main())
